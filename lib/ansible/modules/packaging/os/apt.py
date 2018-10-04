@@ -120,6 +120,11 @@ options:
     type: bool
     default: 'no'
     version_added: "2.4"
+  root_dir:
+    description:
+      - Specify C(RootDir) option for apt-get/aptitude
+    required: false
+    version_added: "2.6.4+"
 requirements:
    - python-apt (python 2)
    - python3-apt (python 3)
@@ -489,7 +494,7 @@ def parse_diff(output):
     return {'prepared': '\n'.join(diff[diff_start:diff_end])}
 
 
-def mark_installed_manually(m, packages):
+def mark_installed_manually(m, packages, root_dir=''):
     if not packages:
         return
 
@@ -501,10 +506,14 @@ def mark_installed_manually(m, packages):
         return
 
     cmd = "%s manual %s" % (apt_mark_cmd_path, ' '.join(packages))
+    if root_dir:
+        cmd += ' -o RootDir="%s"' % root_dir
     rc, out, err = m.run_command(cmd)
 
     if APT_MARK_INVALID_OP in err or APT_MARK_INVALID_OP_DEB6 in err:
         cmd = "%s unmarkauto %s" % (apt_mark_cmd_path, ' '.join(packages))
+        if root_dir:
+            cmd += ' -o RootDir="%s"' % root_dir
         rc, out, err = m.run_command(cmd)
 
     if rc != 0:
@@ -515,7 +524,7 @@ def install(m, pkgspec, cache, upgrade=False, default_release=None,
             install_recommends=None, force=False,
             dpkg_options=expand_dpkg_options(DPKG_OPTIONS),
             build_dep=False, autoremove=False, only_upgrade=False,
-            allow_unauthenticated=False):
+            allow_unauthenticated=False, root_dir=''):
     pkg_list = []
     packages = ""
     pkgspec = expand_pkgspec_from_fnmatches(m, pkgspec, cache)
@@ -579,6 +588,9 @@ def install(m, pkgspec, cache, upgrade=False, default_release=None,
         if allow_unauthenticated:
             cmd += " --allow-unauthenticated"
 
+        if root_dir:
+            cmd += ' -o RootDir="%s"' % root_dir
+
         rc, out, err = m.run_command(cmd)
         if m._diff:
             diff = parse_diff(out)
@@ -599,31 +611,34 @@ def install(m, pkgspec, cache, upgrade=False, default_release=None,
         data = dict(changed=False)
 
     if not build_dep:
-        mark_installed_manually(m, package_names)
+        mark_installed_manually(m, package_names, root_dir=root_dir)
 
     return (status, data)
 
 
-def get_field_of_deb(m, deb_file, field="Version"):
+def get_field_of_deb(m, deb_file, field="Version", root_dir=''):
     cmd_dpkg = m.get_bin_path("dpkg", True)
-    cmd = cmd_dpkg + " --field %s %s" % (deb_file, field)
+    cmd = cmd_dpkg
+    if root_dir:
+        cmd += ' --root "%s"' % root_dir
+    cmd += " --field %s %s" % (deb_file, field)
     rc, stdout, stderr = m.run_command(cmd)
     if rc != 0:
         m.fail_json(msg="%s failed" % cmd, stdout=stdout, stderr=stderr)
     return to_native(stdout).strip('\n')
 
 
-def install_deb(m, debs, cache, force, install_recommends, allow_unauthenticated, dpkg_options):
+def install_deb(m, debs, cache, force, install_recommends, allow_unauthenticated, dpkg_options, root_dir=''):
     changed = False
     deps_to_install = []
     pkgs_to_install = []
     for deb_file in debs.split(','):
         try:
             pkg = apt.debfile.DebPackage(deb_file)
-            pkg_name = get_field_of_deb(m, deb_file, "Package")
-            pkg_version = get_field_of_deb(m, deb_file, "Version")
+            pkg_name = get_field_of_deb(m, deb_file, "Package", root_dir=root_dir)
+            pkg_version = get_field_of_deb(m, deb_file, "Version", root_dir=root_dir)
             if len(apt_pkg.get_architectures()) > 1:
-                pkg_arch = get_field_of_deb(m, deb_file, "Architecture")
+                pkg_arch = get_field_of_deb(m, deb_file, "Architecture", root_dir=root_dir)
                 pkg_key = "%s:%s" % (pkg_name, pkg_arch)
             else:
                 pkg_key = pkg_name
@@ -655,7 +670,8 @@ def install_deb(m, debs, cache, force, install_recommends, allow_unauthenticated
     if deps_to_install:
         (success, retvals) = install(m=m, pkgspec=deps_to_install, cache=cache,
                                      install_recommends=install_recommends,
-                                     dpkg_options=expand_dpkg_options(dpkg_options))
+                                     dpkg_options=expand_dpkg_options(dpkg_options),
+                                     root_dir=root_dir)
         if not success:
             m.fail_json(**retvals)
         changed = retvals.get('changed', False)
@@ -667,7 +683,10 @@ def install_deb(m, debs, cache, force, install_recommends, allow_unauthenticated
         if force:
             options += " --force-all"
 
-        cmd = "dpkg %s -i %s" % (options, " ".join(pkgs_to_install))
+        cmd = "dpkg"
+        if root_dir:
+            cmd += ' --root "%s"' % root_dir
+        cmd += " %s -i %s" % (options, " ".join(pkgs_to_install))
         rc, out, err = m.run_command(cmd)
         if "stdout" in retvals:
             stdout = retvals["stdout"] + out
@@ -693,7 +712,7 @@ def install_deb(m, debs, cache, force, install_recommends, allow_unauthenticated
 
 
 def remove(m, pkgspec, cache, purge=False, force=False,
-           dpkg_options=expand_dpkg_options(DPKG_OPTIONS), autoremove=False):
+           dpkg_options=expand_dpkg_options(DPKG_OPTIONS), autoremove=False, root_dir=''):
     pkg_list = []
     pkgspec = expand_pkgspec_from_fnmatches(m, pkgspec, cache)
     for package in pkgspec:
@@ -728,6 +747,9 @@ def remove(m, pkgspec, cache, purge=False, force=False,
 
         cmd = "%s -q -y %s %s %s %s %s remove %s" % (APT_GET_CMD, dpkg_options, purge, force_yes, autoremove, check_arg, packages)
 
+        if root_dir:
+            cmd += ' -o RootDir="%s"' % root_dir
+
         rc, out, err = m.run_command(cmd)
         if m._diff:
             diff = parse_diff(out)
@@ -739,7 +761,7 @@ def remove(m, pkgspec, cache, purge=False, force=False,
 
 
 def cleanup(m, purge=False, force=False, operation=None,
-            dpkg_options=expand_dpkg_options(DPKG_OPTIONS)):
+            dpkg_options=expand_dpkg_options(DPKG_OPTIONS), root_dir=''):
 
     if operation not in frozenset(['autoremove', 'autoclean']):
         raise AssertionError('Expected "autoremove" or "autoclean" cleanup operation, got %s' % operation)
@@ -761,6 +783,9 @@ def cleanup(m, purge=False, force=False, operation=None,
 
     cmd = "%s -y %s %s %s %s %s" % (APT_GET_CMD, dpkg_options, purge, force_yes, operation, check_arg)
 
+    if root_dir:
+        cmd += ' -o RootDir="%s"' % root_dir
+
     rc, out, err = m.run_command(cmd)
     if m._diff:
         diff = parse_diff(out)
@@ -778,6 +803,7 @@ def upgrade(m, mode="yes", force=False, default_release=None,
             use_apt_get=False,
             dpkg_options=expand_dpkg_options(DPKG_OPTIONS), autoremove=False,
             allow_unauthenticated=False,
+            root_dir=''
             ):
 
     if autoremove:
@@ -834,6 +860,9 @@ def upgrade(m, mode="yes", force=False, default_release=None,
     if default_release:
         cmd += " -t '%s'" % (default_release,)
 
+    if root_dir:
+        cmd += ' -o RootDir="%s"' % root_dir
+
     rc, out, err = m.run_command(cmd, prompt_regex=prompt_regex)
     if m._diff:
         diff = parse_diff(out)
@@ -876,50 +905,57 @@ def download(module, deb):
     return deb
 
 
-def get_cache_mtime():
+def get_cache_mtime(root_dir=''):
     """Return mtime of a valid apt cache file.
     Stat the apt cache file and if no cache file is found return 0
     :returns: ``int``
     """
     cache_time = 0
-    if os.path.exists(APT_UPDATE_SUCCESS_STAMP_PATH):
-        cache_time = os.stat(APT_UPDATE_SUCCESS_STAMP_PATH).st_mtime
-    elif os.path.exists(APT_LISTS_PATH):
-        cache_time = os.stat(APT_LISTS_PATH).st_mtime
+    if os.path.exists(root_dir+APT_UPDATE_SUCCESS_STAMP_PATH):
+        cache_time = os.stat(root_dir+APT_UPDATE_SUCCESS_STAMP_PATH).st_mtime
+    elif os.path.exists(root_dir+APT_LISTS_PATH):
+        cache_time = os.stat(root_dir+APT_LISTS_PATH).st_mtime
     return cache_time
 
 
-def get_updated_cache_time():
+def get_updated_cache_time(root_dir=''):
     """Return the mtime time stamp and the updated cache time.
     Always retrieve the mtime of the apt cache or set the `cache_mtime`
     variable to 0
     :returns: ``tuple``
     """
-    cache_mtime = get_cache_mtime()
+    cache_mtime = get_cache_mtime(root_dir=root_dir)
     mtimestamp = datetime.datetime.fromtimestamp(cache_mtime)
     updated_cache_time = int(time.mktime(mtimestamp.timetuple()))
     return mtimestamp, updated_cache_time
 
 
 # https://github.com/ansible/ansible-modules-core/issues/2951
-def get_cache(module):
+def get_cache(module, root_dir=''):
     '''Attempt to get the cache object and update till it works'''
     cache = None
+    rootdir='/'
+    if root_dir:
+        rootdir = root_dir
     try:
-        cache = apt.Cache()
+        cache = apt.Cache(rootdir=rootdir)
     except SystemError as e:
         if '/var/lib/apt/lists/' in to_native(e).lower():
             # update cache until files are fixed or retries exceeded
+            cmd = ['apt-get']
+            if root_dir:
+                cmd += ['-o', 'RootDir="%s"' % root_dir]
+            cmd += ['update', '-q']
             retries = 0
             while retries < 2:
-                (rc, so, se) = module.run_command(['apt-get', 'update', '-q'])
+                (rc, so, se) = module.run_command(cmd)
                 retries += 1
                 if rc == 0:
                     break
             if rc != 0:
                 module.fail_json(msg='Updating the cache to correct corrupt package lists failed:\n%s\n%s' % (to_native(e), so + se), rc=rc)
             # try again
-            cache = apt.Cache()
+            cache = apt.Cache(rootdir=rootdir)
         else:
             module.fail_json(msg=to_native(e))
     return cache
@@ -944,6 +980,7 @@ def main():
             only_upgrade=dict(type='bool', default=False),
             force_apt_get=dict(type='bool', default=False),
             allow_unauthenticated=dict(type='bool', default=False, aliases=['allow-unauthenticated']),
+            root_dir=dict(type='str', default=''),
         ),
         mutually_exclusive=[['deb', 'package', 'upgrade']],
         required_one_of=[['autoremove', 'deb', 'package', 'update_cache', 'upgrade']],
@@ -990,6 +1027,7 @@ def main():
     dpkg_options = expand_dpkg_options(p['dpkg_options'])
     autoremove = p['autoremove']
     autoclean = p['autoclean']
+    root_dir = p['root_dir']
 
     # Deal with deprecated aliases
     if p['state'] == 'installed':
@@ -1000,7 +1038,7 @@ def main():
         p['state'] = 'absent'
 
     # Get the cache object
-    cache = get_cache(module)
+    cache = get_cache(module, root_dir=root_dir)
 
     try:
         if p['default_release']:
@@ -1011,7 +1049,7 @@ def main():
             # reopen cache w/ modified config
             cache.open(progress=None)
 
-        mtimestamp, updated_cache_time = get_updated_cache_time()
+        mtimestamp, updated_cache_time = get_updated_cache_time(root_dir=root_dir)
         # Cache valid time is default 0, which will update the cache if
         #  needed and `update_cache` was set to true
         updated_cache = False
@@ -1030,7 +1068,7 @@ def main():
                 else:
                     module.fail_json(msg='Failed to update apt cache: %s' % err)
                 cache.open(progress=None)
-                mtimestamp, post_cache_update_time = get_updated_cache_time()
+                mtimestamp, post_cache_update_time = get_updated_cache_time(root_dir=root_dir)
                 if updated_cache_time != post_cache_update_time:
                     updated_cache = True
                 updated_cache_time = post_cache_update_time
@@ -1047,7 +1085,7 @@ def main():
         force_yes = p['force']
 
         if p['upgrade']:
-            upgrade(module, p['upgrade'], force_yes, p['default_release'], use_apt_get, dpkg_options, autoremove, allow_unauthenticated)
+            upgrade(module, p['upgrade'], force_yes, p['default_release'], use_apt_get, dpkg_options, autoremove, allow_unauthenticated, root_dir=root_dir)
 
         if p['deb']:
             if p['state'] != 'present':
@@ -1057,7 +1095,7 @@ def main():
             install_deb(module, p['deb'], cache,
                         install_recommends=install_recommends,
                         allow_unauthenticated=allow_unauthenticated,
-                        force=force_yes, dpkg_options=p['dpkg_options'])
+                        force=force_yes, dpkg_options=p['dpkg_options'], root_dir=root_dir)
 
         unfiltered_packages = p['package'] or ()
         packages = [package for package in unfiltered_packages if package != '*']
@@ -1067,7 +1105,7 @@ def main():
         if latest and all_installed:
             if packages:
                 module.fail_json(msg='unable to install additional packages when upgrading all installed packages')
-            upgrade(module, 'yes', force_yes, p['default_release'], use_apt_get, dpkg_options, autoremove, allow_unauthenticated)
+            upgrade(module, 'yes', force_yes, p['default_release'], use_apt_get, dpkg_options, autoremove, allow_unauthenticated, root_dir=root_dir)
 
         if packages:
             for package in packages:
@@ -1078,9 +1116,9 @@ def main():
 
         if not packages:
             if autoclean:
-                cleanup(module, p['purge'], force=force_yes, operation='autoclean', dpkg_options=dpkg_options)
+                cleanup(module, p['purge'], force=force_yes, operation='autoclean', dpkg_options=dpkg_options, root_dir=root_dir)
             if autoremove:
-                cleanup(module, p['purge'], force=force_yes, operation='autoremove', dpkg_options=dpkg_options)
+                cleanup(module, p['purge'], force=force_yes, operation='autoremove', dpkg_options=dpkg_options, root_dir=root_dir)
 
         if p['state'] in ('latest', 'present', 'build-dep'):
             state_upgrade = False
@@ -1102,7 +1140,8 @@ def main():
                 build_dep=state_builddep,
                 autoremove=autoremove,
                 only_upgrade=p['only_upgrade'],
-                allow_unauthenticated=allow_unauthenticated
+                allow_unauthenticated=allow_unauthenticated,
+                root_dir=root_dir
             )
 
             # Store if the cache has been updated
@@ -1115,7 +1154,7 @@ def main():
             else:
                 module.fail_json(**retvals)
         elif p['state'] == 'absent':
-            remove(module, packages, cache, p['purge'], force=force_yes, dpkg_options=dpkg_options, autoremove=autoremove)
+            remove(module, packages, cache, p['purge'], force=force_yes, dpkg_options=dpkg_options, autoremove=autoremove, root_dir=root_dir)
 
     except apt.cache.LockFailedException:
         module.fail_json(msg="Failed to lock apt for exclusive operation")
